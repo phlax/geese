@@ -32,6 +32,14 @@ pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
     pub profiles: BTreeMap<String, Profile>,
+    #[serde(default)]
+    pub stack: bool,
+    #[serde(default = "default_stack_delay_ms")]
+    pub stack_delay_ms: u64,
+}
+
+fn default_stack_delay_ms() -> u64 {
+    3000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

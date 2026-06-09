@@ -28,6 +28,9 @@ cargo install --path .
 | `geese paths` | Print the resolved config file path and data root |
 | `geese --foreground` / `-f` | Keep the parent attached, forward `SIGINT`/`SIGTERM`, and wait for launched children |
 | `geese --verbose` / `-v` | Print resolved paths, command lines, and environment differences |
+| `geese --stack` / `-s` | Auto-stack launched windows via Super+S after launch (COSMIC / Wayland; requires `wtype`) |
+| `geese --no-stack` | Disable auto-stacking even when `stack: true` is set in config |
+| `geese --stack-delay <ms>` | Milliseconds to wait after last launch before sending stack keystrokes (default: 3000) |
 | `geese --help` / `--version` | Standard clap output |
 
 ## Compositor setup
@@ -42,9 +45,10 @@ See `docs/README.md` for per-compositor tabbing and stacking notes:
 ## Limitations
 
 - `geese` does not embed Goose windows. Tabbing or stacking is done by your compositor, because Wayland clients cannot reparent other clients' surfaces by design.
-- The symlink and `argv[0]` trick relies on Chromium or Electron deriving the Wayland `app_id` from `argv[0]`. If Goose ever sets `app_id` explicitly, the workaround would need an upstream Goose change instead.
+- The symlink and `argv[0]` trick only affects `WM_CLASS` on X11. On Wayland, Electron derives the `app_id` from `app.getName()` (hard-coded to `goose-app` in Goose's `package.json`), not from `argv[0]`. Every Goose instance therefore presents as `app_id=goose-app` on Wayland regardless of the per-profile symlink. See [`docs/cosmic.md`](docs/cosmic.md) for the full explanation.
 - `geese` sets both `GOOSE_CONFIG_DIR` and the four `XDG_*` variables so profile isolation still works if only one of those mechanisms is respected upstream.
 - On X11 sessions, `geese` appends `--class=goose-<name>` so `WM_CLASS` is distinct too. Chromium ignores that flag on Wayland.
+- For COSMIC desktop users, `geese --stack` attempts to auto-stack windows by synthesising Super+S keystrokes via `wtype` after launch. This is keystroke automation, not real window management. See [`docs/cosmic.md`](docs/cosmic.md) for caveats and requirements.
 
 ## Credit
 
