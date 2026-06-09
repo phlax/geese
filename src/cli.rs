@@ -6,6 +6,7 @@ use crate::launcher::{
     display_binary, launch_profile, spawn_foreground, wait_for_children, LaunchOptions,
 };
 use crate::paths::{profile_paths, resolve_paths};
+use crate::stacker::{stack_after_launch, StackOptions};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Launch isolated Goose desktop profiles")]
@@ -26,6 +27,26 @@ struct Cli {
         help = "Print resolved paths, commands, and env diffs"
     )]
     verbose: bool,
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Auto-stack launched windows using Super+S after launch (COSMIC / Wayland)"
+    )]
+    stack: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Disable auto-stacking even when config has stack: true"
+    )]
+    no_stack: bool,
+    #[arg(
+        long,
+        global = true,
+        value_name = "ms",
+        help = "Milliseconds to wait after last launch before sending stack keystrokes (default: 3000)"
+    )]
+    stack_delay: Option<u64>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -66,6 +87,20 @@ pub fn run() -> Result<()> {
     }
 }
 
+fn stack_opts_from_cli(cli: &Cli, config: &Config) -> StackOptions {
+    let enabled = if cli.no_stack {
+        false
+    } else {
+        cli.stack || config.stack
+    };
+    let delay_ms = cli.stack_delay.unwrap_or(config.stack_delay_ms);
+    StackOptions {
+        enabled,
+        delay_ms,
+        verbose: cli.verbose,
+    }
+}
+
 fn list_profiles(config: &Config, paths: &crate::paths::ResolvedPaths) -> Result<()> {
     println!("NAME\tAPP_ID\tDATA_DIR\tBINARY");
     for name in config.profile_names() {
@@ -95,6 +130,11 @@ fn launch_one(
         verbose: cli.verbose,
     };
 
+    // For a single-profile launch, stacking is always a no-op.
+    if (cli.stack || config.stack) && !cli.no_stack && cli.verbose {
+        eprintln!("stack: single-profile launch, nothing to stack");
+    }
+
     if cli.foreground {
         let (result, child) = spawn_foreground(&effective, &launch_paths, &options)?;
         println!(
@@ -122,10 +162,13 @@ fn launch_all(config: &Config, paths: &crate::paths::ResolvedPaths, cli: &Cli) -
         verbose: cli.verbose,
     };
 
+    let stack_opts = stack_opts_from_cli(cli, config);
     let mut errors = Vec::new();
 
     if cli.foreground {
         let mut children = Vec::new();
+        let mut successful_count = 0usize;
+
         for name in config.profile_names() {
             let effective = match config.effective_profile(name) {
                 Ok(value) => value,
@@ -143,6 +186,7 @@ fn launch_all(config: &Config, paths: &crate::paths::ResolvedPaths, cli: &Cli) -
                         name, result.app_id, result.pid
                     );
                     children.push(child);
+                    successful_count += 1;
                 }
                 Err(error) => {
                     eprintln!("error: failed to launch {}: {error:#}", name);
@@ -151,13 +195,31 @@ fn launch_all(config: &Config, paths: &crate::paths::ResolvedPaths, cli: &Cli) -
             }
         }
 
+        // Run stacker in a separate thread so the main thread can block on children.
+        let stack_opts_thread = StackOptions {
+            enabled: stack_opts.enabled,
+            delay_ms: stack_opts.delay_ms,
+            verbose: stack_opts.verbose,
+        };
+        let stacker_handle =
+            std::thread::spawn(move || stack_after_launch(successful_count, &stack_opts_thread));
+
         if !children.is_empty() {
             let exit_code = wait_for_children(children)?;
             if exit_code != 0 {
                 errors.push(format!("child exit status {exit_code}"));
             }
         }
+
+        if let Err(e) = stacker_handle
+            .join()
+            .unwrap_or(Err(anyhow!("stacker thread panicked")))
+        {
+            eprintln!("geese: stack: {e:#}");
+        }
     } else {
+        let mut successful_count = 0usize;
+
         for name in config.profile_names() {
             let effective = match config.effective_profile(name) {
                 Ok(value) => value,
@@ -169,15 +231,22 @@ fn launch_all(config: &Config, paths: &crate::paths::ResolvedPaths, cli: &Cli) -
             };
             let launch_paths = profile_paths(paths, name);
             match launch_profile(&effective, &launch_paths, &options) {
-                Ok(result) => println!(
-                    "▸ launching {} (app_id={}, pid={})",
-                    name, result.app_id, result.pid
-                ),
+                Ok(result) => {
+                    println!(
+                        "▸ launching {} (app_id={}, pid={})",
+                        name, result.app_id, result.pid
+                    );
+                    successful_count += 1;
+                }
                 Err(error) => {
                     eprintln!("error: failed to launch {}: {error:#}", name);
                     errors.push(name.to_owned());
                 }
             }
+        }
+
+        if let Err(e) = stack_after_launch(successful_count, &stack_opts) {
+            eprintln!("geese: stack: {e:#}");
         }
     }
 
