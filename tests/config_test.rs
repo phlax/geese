@@ -58,7 +58,7 @@ profiles: {}
 
 #[test]
 fn example_config_parses_with_loader() {
-    let path = std::path::Path::new("/tmp/workspace/phlax/geese/config.example.yml");
+    let path = std::path::Path::new("config.example.yml");
     let config = Config::from_path(path).expect("example config should parse");
 
     assert!(config.profiles.contains_key("work"));

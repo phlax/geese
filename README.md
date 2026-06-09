@@ -12,7 +12,7 @@ cargo install --path .
 
 ## Quick start
 
-1. Copy `/tmp/workspace/phlax/geese/config.example.yml` to `~/.config/geese/config.yml`
+1. Copy `config.example.yml` to `~/.config/geese/config.yml`
 2. Edit the profiles, arguments, and environment variables to match your setup
 3. Run `geese`
 
@@ -32,12 +32,12 @@ cargo install --path .
 
 ## Compositor setup
 
-See `/tmp/workspace/phlax/geese/docs/README.md` for per-compositor tabbing and stacking notes:
+See `docs/README.md` for per-compositor tabbing and stacking notes:
 
-- `/tmp/workspace/phlax/geese/docs/cosmic.md`
-- `/tmp/workspace/phlax/geese/docs/sway.md`
-- `/tmp/workspace/phlax/geese/docs/hyprland.md`
-- `/tmp/workspace/phlax/geese/docs/kwin.md`
+- `docs/cosmic.md`
+- `docs/sway.md`
+- `docs/hyprland.md`
+- `docs/kwin.md`
 
 ## Limitations
 
