@@ -1,0 +1,15 @@
+# All defaults are optional
+defaults:
+  binary: goose
+  args: []
+  env: {}
+
+profiles:
+  work:
+    binary: goose
+    args: []
+    env:
+      ANTHROPIC_API_KEY: "sk-..."
+  personal: {}
+  scratch:
+    args: ["--debug"]
