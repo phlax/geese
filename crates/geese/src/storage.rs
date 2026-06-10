@@ -172,7 +172,7 @@ fn validate_name(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs};
+    use std::{env, ffi::OsStr, fs, path::PathBuf};
 
     use tempfile::tempdir;
 
@@ -203,6 +203,48 @@ mod tests {
         profile.unlock().unwrap();
         storage.delete("work-stable").unwrap();
         assert!(storage.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_names_and_duplicate_profiles() {
+        let tempdir = tempdir().unwrap();
+        let storage = Storage::at(tempdir.path().join("geese-root"));
+
+        assert!(matches!(
+            storage.create("bad.name"),
+            Err(Error::InvalidName(name)) if name == "bad.name"
+        ));
+
+        storage.create("source").unwrap();
+        assert!(matches!(
+            storage.create("source"),
+            Err(Error::ProfileExists(name)) if name == "source"
+        ));
+    }
+
+    #[test]
+    fn absolutizes_relative_roots_and_preserves_absolute_roots() {
+        let current_dir = env::current_dir().unwrap();
+
+        let relative = Storage::at(PathBuf::from("relative-geese-root"));
+        let profile = relative.create("source").unwrap();
+        assert_eq!(
+            profile.path(),
+            current_dir
+                .join("relative-geese-root")
+                .join("profiles")
+                .join("source")
+        );
+        fs::remove_dir_all(current_dir.join("relative-geese-root")).unwrap();
+
+        let tempdir = tempdir().unwrap();
+        let absolute_root = tempdir.path().join("absolute-geese-root");
+        let absolute = Storage::at(absolute_root.clone());
+        let absolute_profile = absolute.create("target").unwrap();
+        assert_eq!(
+            absolute_profile.path(),
+            absolute_root.join("profiles").join("target")
+        );
     }
 
     #[test]
