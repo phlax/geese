@@ -81,7 +81,7 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
             }
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
-            _ = wait_for_shutdown(&mut shutdown), if shutdown.is_some() => break,
+            _ = wait_for_shutdown(&mut shutdown) => break,
         }
     }
 
@@ -306,6 +306,8 @@ fn rpc_error(id: Value, code: i64, message: &str) -> String {
 async fn wait_for_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
     if let Some(shutdown) = shutdown {
         let _ = shutdown.changed().await;
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 
