@@ -603,6 +603,7 @@ async fn handle_acp_connection(
         return Ok(()); // Connection closed
     }
 
+    // Trim trailing newlines and carriage returns
     while matches!(buf.last(), Some(b'\n' | b'\r')) {
         buf.pop();
     }
@@ -643,18 +644,21 @@ async fn handle_acp_connection(
         return Ok(());
     }
 
-    // Extract profile name
-    let Some(name) = params.get("name").and_then(Value::as_str) else {
-        let response = rpc_error(id, -32602, "Invalid params: name required");
-        write_half.write_all(response.as_bytes()).await?;
-        write_half.write_all(b"\n").await?;
-        return Ok(());
+    // Extract profile name and make it owned to avoid lifetime issues
+    let name = match params.get("name").and_then(Value::as_str) {
+        Some(n) => n.to_string(),
+        None => {
+            let response = rpc_error(id, -32602, "Invalid params: name required");
+            write_half.write_all(response.as_bytes()).await?;
+            write_half.write_all(b"\n").await?;
+            return Ok(());
+        }
     };
 
     // Look up profile path
     let profile_result = {
         let guard = storage.lock().expect("storage mutex poisoned");
-        guard.get(name).map(|profile| profile.path().to_path_buf())
+        guard.get(&name).map(|profile| profile.path().to_path_buf())
     };
 
     let profile_path = match profile_result {
@@ -676,7 +680,7 @@ async fn handle_acp_connection(
     // Bind ACP connection
     let handles = {
         let mut procs = processes.lock().await;
-        match procs.bind_acp(name, &profile_path).await {
+        match procs.bind_acp(&name, &profile_path).await {
             Ok(handles) => handles,
             Err(ProcessError::ProfileInUse) => {
                 let response = rpc_error(id, -32020, &format!("Profile in use: {}", name));
@@ -734,7 +738,7 @@ async fn handle_acp_connection(
 
     // Unbind and stop the process
     let mut procs = processes.lock().await;
-    let _ = procs.unbind_acp(name).await;
+    let _ = procs.unbind_acp(&name).await;
 
     Ok(())
 }
