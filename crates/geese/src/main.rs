@@ -30,6 +30,14 @@ enum Commands {
     Copy { src: String, dest: String },
     /// Print the path of a profile
     Path { name: String },
+    /// Start a goose acp process for a profile
+    Start { name: String },
+    /// Stop (SIGTERM) a goose acp process for a profile
+    Stop { name: String },
+    /// Kill (SIGKILL) a goose acp process for a profile
+    Kill { name: String },
+    /// List running goose acp processes
+    Ps,
 }
 
 #[derive(Debug, Error)]
@@ -105,6 +113,28 @@ async fn run() -> Result<(), CliError> {
             let mut client = ensure_running().await?;
             let entry = client.get_profile(&name).await?;
             println!("{}", entry.path);
+        }
+        Commands::Start { name } => {
+            let mut client = ensure_running().await?;
+            client.start_goosed(&name).await?;
+        }
+        Commands::Stop { name } => {
+            let mut client = ensure_running().await?;
+            client.stop_goosed(&name).await?;
+        }
+        Commands::Kill { name } => {
+            let mut client = ensure_running().await?;
+            client.kill_goosed(&name).await?;
+        }
+        Commands::Ps => {
+            let mut client = ensure_running().await?;
+            let running = client.list_running_goosed().await?;
+            if !running.is_empty() {
+                println!("{:<20} {:<10} STARTED", "NAME", "PID");
+                for entry in running {
+                    println!("{:<20} {:<10} {}", entry.name, entry.pid, entry.started_at);
+                }
+            }
         }
     }
 
