@@ -6,7 +6,7 @@ use std::{
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use thiserror::Error;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
@@ -18,6 +18,8 @@ pub enum ProcessError {
     Wait(std::io::Error),
     #[error("signal error: {0}")]
     Signal(nix::errno::Errno),
+    #[error("profile already bound")]
+    ProfileInUse,
 }
 
 impl From<nix::errno::Errno> for ProcessError {
@@ -30,6 +32,7 @@ pub struct GoosedChild {
     pub child: Child,
     pub pid: u32,
     pub started_at: DateTime<Utc>,
+    pub acp_bound: bool,
 }
 
 pub struct RunningProcess {
@@ -41,6 +44,12 @@ pub struct RunningProcess {
 pub struct ProcessMap {
     children: HashMap<String, GoosedChild>,
     binary: Option<PathBuf>,
+}
+
+pub struct AcpHandles {
+    pub stdin: ChildStdin,
+    pub stdout: ChildStdout,
+    pub pid: u32,
 }
 
 impl ProcessMap {
@@ -100,10 +109,56 @@ impl ProcessMap {
                 child,
                 pid,
                 started_at,
+                acp_bound: false,
             },
         );
 
         Ok(pid)
+    }
+
+    /// Bind an ACP connection to this profile. Spawns goose if not running.
+    /// Returns the stdio handles to use for the byte pump.
+    /// Errors if already bound (single-client enforcement).
+    pub async fn bind_acp(
+        &mut self,
+        name: &str,
+        profile_path: &Path,
+    ) -> Result<AcpHandles, ProcessError> {
+        // Check if already bound
+        if let Some(child) = self.children.get(name)
+            && child.acp_bound
+        {
+            return Err(ProcessError::ProfileInUse);
+        }
+
+        // Start if not running (or get existing pid)
+        let pid = self.start(name, profile_path).await?;
+
+        // Take stdio handles
+        let child = self
+            .children
+            .get_mut(name)
+            .expect("just inserted or exists");
+
+        let stdin = child
+            .child
+            .stdin
+            .take()
+            .expect("stdin should be available for ACP binding");
+        let stdout = child
+            .child
+            .stdout
+            .take()
+            .expect("stdout should be available for ACP binding");
+
+        child.acp_bound = true;
+
+        Ok(AcpHandles { stdin, stdout, pid })
+    }
+
+    /// Unbind an ACP connection and stop the goose process.
+    pub async fn unbind_acp(&mut self, name: &str) -> Result<(), ProcessError> {
+        self.stop(name).await
     }
 
     pub async fn stop(&mut self, name: &str) -> Result<(), ProcessError> {

@@ -71,6 +71,7 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
 
     let lockfile = Lockfile::acquire(runtime_dir.lockfile_path())?;
     let control_socket = ControlSocket::bind(runtime_dir.socket_path())?;
+    let acp_socket = AcpSocket::bind(runtime_dir.acp_socket_path())?;
     let state = Arc::new(DaemonState::new(lockfile.pid()));
 
     let storage = {
@@ -85,9 +86,10 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
     let processes = Arc::new(TokioMutex::new(ProcessMap::new(goose_bin)));
 
     info!(
-        "geesed v{} listening on {} pid={}",
+        "geesed v{} listening on {} (control) and {} (acp) pid={}",
         env!("CARGO_PKG_VERSION"),
         control_socket.path().display(),
+        acp_socket.path().display(),
         state.pid,
     );
 
@@ -109,12 +111,23 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
                     }
                 });
             }
+            accept_result = acp_socket.accept() => {
+                let (stream, _) = accept_result?;
+                let storage = Arc::clone(&storage);
+                let processes = Arc::clone(&processes);
+                tasks.spawn(async move {
+                    if let Err(error) = handle_acp_connection(stream, storage, processes).await {
+                        tracing::debug!("acp connection ended with error: {error}");
+                    }
+                });
+            }
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
             _ = wait_for_shutdown(&mut shutdown) => break,
         }
     }
 
+    drop(acp_socket);
     drop(control_socket);
     drop(lockfile);
 
@@ -149,6 +162,10 @@ impl RuntimeDir {
 
     fn socket_path(&self) -> PathBuf {
         self.path.join("control.sock")
+    }
+
+    fn acp_socket_path(&self) -> PathBuf {
+        self.path.join("acp.sock")
     }
 
     fn lockfile_path(&self) -> PathBuf {
@@ -233,6 +250,38 @@ impl ControlSocket {
 }
 
 impl Drop for ControlSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Debug)]
+struct AcpSocket {
+    path: PathBuf,
+    listener: UnixListener,
+}
+
+impl AcpSocket {
+    fn bind(path: PathBuf) -> Result<Self, RunError> {
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(Self { path, listener })
+    }
+
+    async fn accept(&self) -> Result<(UnixStream, tokio::net::unix::SocketAddr), RunError> {
+        self.listener.accept().await.map_err(RunError::Io)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for AcpSocket {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
@@ -537,6 +586,157 @@ async fn wait_for_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
     } else {
         std::future::pending::<()>().await;
     }
+}
+
+async fn handle_acp_connection(
+    stream: UnixStream,
+    storage: Arc<Mutex<geese::Storage>>,
+    processes: Arc<TokioMutex<ProcessMap>>,
+) -> std::io::Result<()> {
+    let (mut read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(&mut read_half);
+    let mut buf = Vec::new();
+
+    // Read handshake line
+    let bytes = reader.read_until(b'\n', &mut buf).await?;
+    if bytes == 0 {
+        return Ok(()); // Connection closed
+    }
+
+    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+        buf.pop();
+    }
+
+    let handshake_line = match std::str::from_utf8(&buf) {
+        Ok(line) => line,
+        Err(_) => {
+            let response = rpc_error(Value::Null, -32700, "Parse error");
+            write_half.write_all(response.as_bytes()).await?;
+            write_half.write_all(b"\n").await?;
+            return Ok(());
+        }
+    };
+
+    let value: Value = match serde_json::from_str(handshake_line) {
+        Ok(value) => value,
+        Err(_) => {
+            let response = rpc_error(Value::Null, -32700, "Parse error");
+            write_half.write_all(response.as_bytes()).await?;
+            write_half.write_all(b"\n").await?;
+            return Ok(());
+        }
+    };
+
+    let id = value.get("id").cloned().unwrap_or(Value::Null);
+    let method = value.get("method").and_then(Value::as_str);
+    let params = value.get("params").cloned().unwrap_or(Value::Null);
+
+    // Validate method is connect_profile
+    if method != Some("connect_profile") {
+        let response = rpc_error(
+            id,
+            -32021,
+            "Invalid handshake: method must be connect_profile",
+        );
+        write_half.write_all(response.as_bytes()).await?;
+        write_half.write_all(b"\n").await?;
+        return Ok(());
+    }
+
+    // Extract profile name
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        let response = rpc_error(id, -32602, "Invalid params: name required");
+        write_half.write_all(response.as_bytes()).await?;
+        write_half.write_all(b"\n").await?;
+        return Ok(());
+    };
+
+    // Look up profile path
+    let profile_result = {
+        let guard = storage.lock().expect("storage mutex poisoned");
+        guard.get(name).map(|profile| profile.path().to_path_buf())
+    };
+
+    let profile_path = match profile_result {
+        Ok(path) => path,
+        Err(geese::Error::ProfileNotFound(_)) => {
+            let response = rpc_error(id, -32001, &format!("Profile not found: {}", name));
+            write_half.write_all(response.as_bytes()).await?;
+            write_half.write_all(b"\n").await?;
+            return Ok(());
+        }
+        Err(e) => {
+            let response = rpc_error(id, -32000, &e.to_string());
+            write_half.write_all(response.as_bytes()).await?;
+            write_half.write_all(b"\n").await?;
+            return Ok(());
+        }
+    };
+
+    // Bind ACP connection
+    let handles = {
+        let mut procs = processes.lock().await;
+        match procs.bind_acp(name, &profile_path).await {
+            Ok(handles) => handles,
+            Err(ProcessError::ProfileInUse) => {
+                let response = rpc_error(id, -32020, &format!("Profile in use: {}", name));
+                write_half.write_all(response.as_bytes()).await?;
+                write_half.write_all(b"\n").await?;
+                return Ok(());
+            }
+            Err(ProcessError::GooseBinaryUnavailable(msg)) => {
+                let response = rpc_error(id, -32010, &msg);
+                write_half.write_all(response.as_bytes()).await?;
+                write_half.write_all(b"\n").await?;
+                return Ok(());
+            }
+            Err(ProcessError::SpawnFailed(msg)) => {
+                let response = rpc_error(id, -32011, &msg);
+                write_half.write_all(response.as_bytes()).await?;
+                write_half.write_all(b"\n").await?;
+                return Ok(());
+            }
+            Err(e) => {
+                let response = rpc_error(id, -32000, &e.to_string());
+                write_half.write_all(response.as_bytes()).await?;
+                write_half.write_all(b"\n").await?;
+                return Ok(());
+            }
+        }
+    };
+
+    // Send success response
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {"pid": handles.pid}
+    })
+    .to_string();
+    write_half.write_all(response.as_bytes()).await?;
+    write_half.write_all(b"\n").await?;
+
+    // Enter byte pump mode
+    let mut stdin = handles.stdin;
+    let mut stdout = handles.stdout;
+
+    let to_goose = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut read_half, &mut stdin).await;
+    });
+
+    let from_goose = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut stdout, &mut write_half).await;
+    });
+
+    tokio::select! {
+        _ = to_goose => {},
+        _ = from_goose => {},
+    }
+
+    // Unbind and stop the process
+    let mut procs = processes.lock().await;
+    let _ = procs.unbind_acp(name).await;
+
+    Ok(())
 }
 
 fn default_runtime_dir() -> PathBuf {
