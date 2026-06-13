@@ -60,7 +60,12 @@ impl ProcessMap {
         }
     }
 
-    pub async fn start(&mut self, name: &str, profile_path: &Path) -> Result<u32, ProcessError> {
+    pub async fn start(
+        &mut self,
+        name: &str,
+        profile_path: &Path,
+        cwd: &Path,
+    ) -> Result<u32, ProcessError> {
         let binary = self.binary.as_ref().ok_or_else(|| {
             ProcessError::GooseBinaryUnavailable(
                 "set GEESE_GOOSE_BIN or install goose on PATH".to_string(),
@@ -81,10 +86,21 @@ impl ProcessMap {
         let mut cmd = Command::new(binary);
         cmd.arg("acp")
             .env("GOOSE_PATH_ROOT", profile_path)
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
+
+        if cwd.is_dir() {
+            cmd.current_dir(cwd);
+        } else {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                profile = name,
+                "configured cwd does not exist; falling back to geesed's working directory"
+            );
+        }
 
         let mut child = cmd
             .spawn()
@@ -128,6 +144,7 @@ impl ProcessMap {
         &mut self,
         name: &str,
         profile_path: &Path,
+        cwd: &Path,
     ) -> Result<AcpHandles, ProcessError> {
         // Single-owner contract (#22): if any entry exists for this
         // profile, refuse — regardless of whether it was started via
@@ -139,7 +156,7 @@ impl ProcessMap {
         }
 
         // Not running — spawn fresh
-        let pid = self.start(name, profile_path).await?;
+        let pid = self.start(name, profile_path, cwd).await?;
 
         // Take stdio handles
         let child = self
