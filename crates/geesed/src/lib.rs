@@ -494,6 +494,9 @@ async fn dispatch_rpc(
                 Ok(pid) => json!({"jsonrpc":"2.0","id":id,"result":{"pid":pid}}).to_string(),
                 Err(ProcessError::GooseBinaryUnavailable(msg)) => rpc_error(id, -32010, &msg),
                 Err(ProcessError::SpawnFailed(msg)) => rpc_error(id, -32011, &msg),
+                Err(ProcessError::ProfileInUse) => {
+                    rpc_error(id, -32020, "profile already owned by an ACP connection")
+                }
                 Err(e) => rpc_error(id, -32000, &e.to_string()),
             }
         }
