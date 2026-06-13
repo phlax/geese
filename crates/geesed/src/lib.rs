@@ -17,15 +17,19 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::watch,
+    sync::{Mutex as TokioMutex, watch},
     task::JoinSet,
 };
 use tracing::info;
+
+pub mod processes;
+use processes::{ProcessError, ProcessMap};
 
 #[derive(Debug, Default)]
 pub struct RunOpts {
     pub runtime_dir: Option<PathBuf>,
     pub geese_root: Option<PathBuf>,
+    pub goose_bin: Option<PathBuf>,
     pub shutdown: Option<watch::Receiver<bool>>,
 }
 
@@ -37,6 +41,11 @@ impl RunOpts {
 
     pub fn with_geese_root(mut self, geese_root: impl Into<PathBuf>) -> Self {
         self.geese_root = Some(geese_root.into());
+        self
+    }
+
+    pub fn with_goose_bin(mut self, goose_bin: impl Into<PathBuf>) -> Self {
+        self.goose_bin = Some(goose_bin.into());
         self
     }
 
@@ -72,6 +81,9 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
         Arc::new(Mutex::new(s))
     };
 
+    let goose_bin = resolve_goose_bin(opts.goose_bin.as_deref());
+    let processes = Arc::new(TokioMutex::new(ProcessMap::new(goose_bin)));
+
     info!(
         "geesed v{} listening on {} pid={}",
         env!("CARGO_PKG_VERSION"),
@@ -90,8 +102,9 @@ pub async fn run(opts: RunOpts) -> Result<(), RunError> {
                 let (stream, _) = accept_result?;
                 let state = Arc::clone(&state);
                 let storage = Arc::clone(&storage);
+                let processes = Arc::clone(&processes);
                 tasks.spawn(async move {
-                    if let Err(error) = handle_connection(stream, state, storage).await {
+                    if let Err(error) = handle_connection(stream, state, storage, processes).await {
                         tracing::debug!("control connection ended with error: {error}");
                     }
                 });
@@ -268,6 +281,7 @@ async fn handle_connection(
     stream: UnixStream,
     state: Arc<DaemonState>,
     storage: Arc<Mutex<geese::Storage>>,
+    processes: Arc<TokioMutex<ProcessMap>>,
 ) -> std::io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -285,7 +299,7 @@ async fn handle_connection(
         }
 
         let response = match std::str::from_utf8(&buf) {
-            Ok(line) => rpc_response(line, &state, &storage),
+            Ok(line) => dispatch_rpc(line, &state, &storage, &processes).await,
             Err(_) => rpc_error(Value::Null, -32700, "Parse error"),
         };
 
@@ -294,7 +308,12 @@ async fn handle_connection(
     }
 }
 
-fn rpc_response(line: &str, state: &DaemonState, storage: &Mutex<geese::Storage>) -> String {
+async fn dispatch_rpc(
+    line: &str,
+    state: &DaemonState,
+    storage: &Mutex<geese::Storage>,
+    processes: &TokioMutex<ProcessMap>,
+) -> String {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(_) => return rpc_error(Value::Null, -32700, "Parse error"),
@@ -409,6 +428,65 @@ fn rpc_response(line: &str, state: &DaemonState, storage: &Mutex<geese::Storage>
             }
         }
 
+        Some("goosed.start") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            // Look up profile path (sync lock, released before any await)
+            let profile_path = {
+                let guard = storage.lock().expect("storage mutex poisoned");
+                match guard.get(name) {
+                    Ok(profile) => profile.path().to_path_buf(),
+                    Err(e) => return rpc_error(id, geese_error_code(&e), &e.to_string()),
+                }
+            };
+            let mut procs = processes.lock().await;
+            match procs.start(name, &profile_path).await {
+                Ok(pid) => json!({"jsonrpc":"2.0","id":id,"result":{"pid":pid}}).to_string(),
+                Err(ProcessError::GooseBinaryUnavailable(msg)) => rpc_error(id, -32010, &msg),
+                Err(ProcessError::SpawnFailed(msg)) => rpc_error(id, -32011, &msg),
+                Err(e) => rpc_error(id, -32000, &e.to_string()),
+            }
+        }
+
+        Some("goosed.stop") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let mut procs = processes.lock().await;
+            match procs.stop(name).await {
+                Ok(()) => json!({"jsonrpc":"2.0","id":id,"result":null}).to_string(),
+                Err(e) => rpc_error(id, -32000, &e.to_string()),
+            }
+        }
+
+        Some("goosed.kill") => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return rpc_error(id, -32602, "Invalid params");
+            };
+            let mut procs = processes.lock().await;
+            match procs.kill(name).await {
+                Ok(()) => json!({"jsonrpc":"2.0","id":id,"result":null}).to_string(),
+                Err(e) => rpc_error(id, -32000, &e.to_string()),
+            }
+        }
+
+        Some("goosed.list_running") => {
+            let procs = processes.lock().await;
+            let running = procs.list();
+            let entries: Vec<Value> = running
+                .iter()
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "pid": p.pid,
+                        "started_at": p.started_at,
+                    })
+                })
+                .collect();
+            json!({"jsonrpc":"2.0","id":id,"result":entries}).to_string()
+        }
+
         _ => rpc_error(id, -32601, "Method not found"),
     }
 }
@@ -466,4 +544,43 @@ fn default_runtime_dir() -> PathBuf {
         Some(runtime_dir) => PathBuf::from(runtime_dir).join("geese"),
         None => env::temp_dir().join(format!("geese-{}", Uid::current().as_raw())),
     }
+}
+
+/// Resolve the goose binary path. Resolution order:
+/// 1. `override_path` from `RunOpts::with_goose_bin` (test override)
+/// 2. `GEESE_GOOSE_BIN` env var (absolute path or bare name resolved against PATH)
+/// 3. `which("goose")` from PATH
+/// 4. `None` — start succeeds but `goosed.start` will return GooseBinaryUnavailable
+fn resolve_goose_bin(override_path: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = override_path {
+        return Some(p.to_path_buf());
+    }
+
+    if let Ok(val) = env::var("GEESE_GOOSE_BIN") {
+        let path = PathBuf::from(&val);
+        if path.is_absolute() {
+            return Some(path);
+        }
+        // Bare name: search PATH
+        if let Some(found) = search_path(&val) {
+            return Some(found);
+        }
+    }
+
+    search_path("goose")
+}
+
+fn search_path(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if let Ok(meta) = candidate.metadata()
+            && meta.is_file()
+            && meta.permissions().mode() & 0o111 != 0
+        {
+            return Some(candidate);
+        }
+    }
+    None
 }

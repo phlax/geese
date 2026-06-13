@@ -106,6 +106,26 @@ impl GeesedClient {
         .await
     }
 
+    pub async fn start_goosed(&mut self, name: &str) -> Result<StartGoosedResponse, ClientError> {
+        self.call("goosed.start", serde_json::json!({"name": name}))
+            .await
+    }
+
+    pub async fn stop_goosed(&mut self, name: &str) -> Result<(), ClientError> {
+        self.call_void("goosed.stop", serde_json::json!({"name": name}))
+            .await
+    }
+
+    pub async fn kill_goosed(&mut self, name: &str) -> Result<(), ClientError> {
+        self.call_void("goosed.kill", serde_json::json!({"name": name}))
+            .await
+    }
+
+    pub async fn list_running_goosed(&mut self) -> Result<Vec<RunningGoosed>, ClientError> {
+        self.call("goosed.list_running", serde_json::json!({}))
+            .await
+    }
+
     async fn rpc_call(
         &self,
         method: &str,
@@ -276,6 +296,20 @@ pub struct ProfileEntry {
     pub locked: bool,
     pub parent: Option<String>,
     pub path: String,
+}
+
+/// Response from `goosed.start`.
+#[derive(Debug, Deserialize)]
+pub struct StartGoosedResponse {
+    pub pid: u32,
+}
+
+/// Entry in the list returned by `goosed.list_running`.
+#[derive(Debug, Deserialize)]
+pub struct RunningGoosed {
+    pub name: String,
+    pub pid: u32,
+    pub started_at: String,
 }
 
 #[derive(Debug, Error)]
