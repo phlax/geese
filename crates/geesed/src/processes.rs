@@ -86,12 +86,15 @@ impl ProcessMap {
         let mut cmd = Command::new(binary);
         cmd.arg("acp")
             .env("GOOSE_PATH_ROOT", profile_path)
-            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
 
+        // Apply cwd only if it exists on disk; otherwise inherit geesed's cwd
+        // with a warning. This prevents `Command::spawn` from failing with an
+        // ambiguous ENOENT (which would otherwise be indistinguishable from a
+        // missing binary) when the configured cwd is stale or never existed.
         if cwd.is_dir() {
             cmd.current_dir(cwd);
         } else {
