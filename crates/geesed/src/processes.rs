@@ -67,8 +67,13 @@ impl ProcessMap {
             )
         })?;
 
-        // Idempotent: return existing pid if already running
+        // Idempotent: return existing pid if already running, but only if
+        // it was started via the same path. If an ACP connection currently
+        // owns this profile, refuse — single-owner contract per #22.
         if let Some(child) = self.children.get(name) {
+            if child.acp_bound {
+                return Err(ProcessError::ProfileInUse);
+            }
             return Ok(child.pid);
         }
 
@@ -124,14 +129,16 @@ impl ProcessMap {
         name: &str,
         profile_path: &Path,
     ) -> Result<AcpHandles, ProcessError> {
-        // Check if already bound
-        if let Some(child) = self.children.get(name)
-            && child.acp_bound
-        {
+        // Single-owner contract (#22): if any entry exists for this
+        // profile, refuse — regardless of whether it was started via
+        // goosed.start (acp_bound=false) or a previous connect_profile
+        // (acp_bound=true). Both flavours of "in use" map to the same
+        // error to the client.
+        if self.children.contains_key(name) {
             return Err(ProcessError::ProfileInUse);
         }
 
-        // Start if not running (or get existing pid)
+        // Not running — spawn fresh
         let pid = self.start(name, profile_path).await?;
 
         // Take stdio handles
