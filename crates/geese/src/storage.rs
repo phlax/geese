@@ -277,16 +277,12 @@ fn validate_name(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, ffi::OsStr, fs, path::PathBuf, sync::Mutex};
+    use std::{env, ffi::OsStr, fs, path::PathBuf};
 
     use tempfile::tempdir;
 
     use super::Storage;
     use crate::{GlobalConfig, error::Error};
-
-    /// Serialize all tests that touch process-wide environment variables so
-    /// they don't interfere with each other when run in parallel.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn manages_profile_lifecycle() {
@@ -397,132 +393,147 @@ mod tests {
     }
 
     /// resolve_cwd tier 1: per-profile field wins over everything else.
+    ///
+    /// All env-touching tests below use `temp_env::with_vars`, which sets the
+    /// requested vars for the closure body and restores their prior state on
+    /// drop (panic-safe). `temp-env` also takes a crate-level mutex around
+    /// every call, which replaces the hand-rolled `ENV_LOCK: Mutex<()>` static
+    /// the previous shape carried per-test.
     #[test]
     fn resolve_cwd_tier1_per_profile_field() {
-        let _env_guard = ENV_LOCK.lock().unwrap();
         let tempdir = tempdir().unwrap();
         let config_dir = tempdir.path().join("config");
         let storage = Storage::at(tempdir.path().join("geese-root"));
-        // Isolate XDG and home-dir env vars
-        unsafe {
-            env::set_var("XDG_CONFIG_HOME", &config_dir);
-            env::remove_var("GEESE_CWD");
-            env::remove_var("GEESE_PROFILE_CWD_WORK");
-        }
 
-        storage.create("work").unwrap();
-        let profile_cwd = tempdir.path().join("profile-cwd");
-        storage
-            .set_profile_cwd("work", profile_cwd.clone())
-            .unwrap();
+        temp_env::with_vars(
+            [
+                ("XDG_CONFIG_HOME", Some(config_dir.as_path())),
+                ("GEESE_CWD", None),
+                ("GEESE_PROFILE_CWD_WORK", None),
+            ],
+            || {
+                storage.create("work").unwrap();
+                let profile_cwd = tempdir.path().join("profile-cwd");
+                storage
+                    .set_profile_cwd("work", profile_cwd.clone())
+                    .unwrap();
 
-        // Write a global config pointing elsewhere
-        GlobalConfig {
-            cwd: Some(tempdir.path().join("global-cwd")),
-        }
-        .save()
-        .unwrap();
+                // Write a global config pointing elsewhere
+                GlobalConfig {
+                    cwd: Some(tempdir.path().join("global-cwd")),
+                }
+                .save()
+                .unwrap();
 
-        assert_eq!(storage.resolve_cwd("work"), profile_cwd);
+                assert_eq!(storage.resolve_cwd("work"), profile_cwd);
+            },
+        );
     }
 
     /// resolve_cwd tier 2: per-profile env var.
     #[test]
     fn resolve_cwd_tier2_per_profile_env_var() {
-        let _env_guard = ENV_LOCK.lock().unwrap();
         let tempdir = tempdir().unwrap();
         let config_dir = tempdir.path().join("config");
         let storage = Storage::at(tempdir.path().join("geese-root"));
-        unsafe {
-            env::set_var("XDG_CONFIG_HOME", &config_dir);
-            env::remove_var("GEESE_CWD");
-        }
-
-        storage.create("work").unwrap();
-        // No per-profile field set
         let env_cwd = tempdir.path().join("env-cwd");
-        unsafe { env::set_var("GEESE_PROFILE_CWD_WORK", &env_cwd) };
 
-        // Global config points elsewhere — should be ignored
-        GlobalConfig {
-            cwd: Some(tempdir.path().join("global-cwd")),
-        }
-        .save()
-        .unwrap();
+        temp_env::with_vars(
+            [
+                ("XDG_CONFIG_HOME", Some(config_dir.as_path())),
+                ("GEESE_CWD", None),
+                ("GEESE_PROFILE_CWD_WORK", Some(env_cwd.as_path())),
+            ],
+            || {
+                storage.create("work").unwrap();
+                // No per-profile field set
 
-        let resolved = storage.resolve_cwd("work");
-        unsafe { env::remove_var("GEESE_PROFILE_CWD_WORK") };
-        assert_eq!(resolved, env_cwd);
+                // Global config points elsewhere — should be ignored
+                GlobalConfig {
+                    cwd: Some(tempdir.path().join("global-cwd")),
+                }
+                .save()
+                .unwrap();
+
+                assert_eq!(storage.resolve_cwd("work"), env_cwd);
+            },
+        );
     }
 
     /// resolve_cwd tier 3: global config cwd.
     #[test]
     fn resolve_cwd_tier3_global_config() {
-        let _env_guard = ENV_LOCK.lock().unwrap();
         let tempdir = tempdir().unwrap();
         let config_dir = tempdir.path().join("config");
         let storage = Storage::at(tempdir.path().join("geese-root"));
-        unsafe {
-            env::set_var("XDG_CONFIG_HOME", &config_dir);
-            env::remove_var("GEESE_CWD");
-            env::remove_var("GEESE_PROFILE_CWD_WORK");
-        }
 
-        storage.create("work").unwrap();
-        // No per-profile field, no per-profile env var
+        temp_env::with_vars(
+            [
+                ("XDG_CONFIG_HOME", Some(config_dir.as_path())),
+                ("GEESE_CWD", None),
+                ("GEESE_PROFILE_CWD_WORK", None),
+            ],
+            || {
+                storage.create("work").unwrap();
+                // No per-profile field, no per-profile env var
 
-        let global_cwd = tempdir.path().join("global-cwd");
-        GlobalConfig {
-            cwd: Some(global_cwd.clone()),
-        }
-        .save()
-        .unwrap();
+                let global_cwd = tempdir.path().join("global-cwd");
+                GlobalConfig {
+                    cwd: Some(global_cwd.clone()),
+                }
+                .save()
+                .unwrap();
 
-        assert_eq!(storage.resolve_cwd("work"), global_cwd);
+                assert_eq!(storage.resolve_cwd("work"), global_cwd);
+            },
+        );
     }
 
     /// resolve_cwd tier 4: GEESE_CWD env var.
     #[test]
     fn resolve_cwd_tier4_global_env_var() {
-        let _env_guard = ENV_LOCK.lock().unwrap();
         let tempdir = tempdir().unwrap();
         let config_dir = tempdir.path().join("config");
         let storage = Storage::at(tempdir.path().join("geese-root"));
-        unsafe {
-            env::set_var("XDG_CONFIG_HOME", &config_dir);
-            env::remove_var("GEESE_PROFILE_CWD_WORK");
-        }
-
-        storage.create("work").unwrap();
-        // No per-profile field, no per-profile env var, no global config
-
         let global_env_cwd = tempdir.path().join("geese-cwd");
-        unsafe { env::set_var("GEESE_CWD", &global_env_cwd) };
 
-        let resolved = storage.resolve_cwd("work");
-        unsafe { env::remove_var("GEESE_CWD") };
-        assert_eq!(resolved, global_env_cwd);
+        temp_env::with_vars(
+            [
+                ("XDG_CONFIG_HOME", Some(config_dir.as_path())),
+                ("GEESE_PROFILE_CWD_WORK", None),
+                ("GEESE_CWD", Some(global_env_cwd.as_path())),
+            ],
+            || {
+                storage.create("work").unwrap();
+                // No per-profile field, no per-profile env var, no global config
+
+                assert_eq!(storage.resolve_cwd("work"), global_env_cwd);
+            },
+        );
     }
 
     /// resolve_cwd tier 5: home directory fallback.
     #[test]
     fn resolve_cwd_tier5_home_dir_fallback() {
-        let _env_guard = ENV_LOCK.lock().unwrap();
         let tempdir = tempdir().unwrap();
         let config_dir = tempdir.path().join("config");
         let storage = Storage::at(tempdir.path().join("geese-root"));
-        unsafe {
-            env::set_var("XDG_CONFIG_HOME", &config_dir);
-            env::remove_var("GEESE_CWD");
-            env::remove_var("GEESE_PROFILE_CWD_WORK");
-        }
 
-        storage.create("work").unwrap();
-        // Nothing set — should fall back to home dir
+        temp_env::with_vars(
+            [
+                ("XDG_CONFIG_HOME", Some(config_dir.as_path())),
+                ("GEESE_CWD", None),
+                ("GEESE_PROFILE_CWD_WORK", None),
+            ],
+            || {
+                storage.create("work").unwrap();
+                // Nothing set — should fall back to home dir
 
-        let resolved = storage.resolve_cwd("work");
-        let expected = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        assert_eq!(resolved, expected);
+                let resolved = storage.resolve_cwd("work");
+                let expected = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+                assert_eq!(resolved, expected);
+            },
+        );
     }
 
     /// set/unset per-profile cwd round-trips through profile.toml.
