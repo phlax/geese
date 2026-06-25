@@ -15,3 +15,10 @@ tokio.workspace = true
 assert_cmd.workspace = true
 tempfile.workspace = true
 nix.workspace = true
+# Scope-guarded env mutator for `tests/integration.rs`. Replaces the
+# `unsafe { std::env::set_var }` shape and lets the integration tests
+# drop their hand-rolled `ENV_LOCK` Mutex.
+temp-env.workspace = true
+
+[lints]
+workspace = true

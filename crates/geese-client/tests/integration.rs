@@ -11,12 +11,14 @@ use nix::{
     unistd::Pid,
 };
 use tempfile::tempdir;
-use tokio::sync::Mutex;
 
-/// Serialises tests that mutate process-wide env vars so they don't race.
-/// Using `tokio::sync::Mutex` so the guard can be held across `.await` points
-/// without triggering `clippy::await_holding_lock`.
-static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+// `temp_env::async_with_vars` replaces the hand-rolled `ENV_LOCK`
+// Mutex this file used to carry. temp-env wraps the underlying
+// `unsafe { std::env::set_var }` (so this test stays inside the
+// workspace `unsafe_code = "forbid"` lint), serialises concurrent
+// env mutations via its own crate-level mutex, and restores the
+// previous env state on drop *even if the test body panics* — which
+// the old manual `set_var` / `remove_var` pair did not.
 
 fn spawn_geesed(runtime_root: &Path) -> Child {
     Command::new(assert_cmd::cargo::cargo_bin("geesed"))
@@ -76,16 +78,11 @@ async fn ensure_running_connects_to_existing_daemon() {
     let mut daemon = spawn_geesed(tempdir.path());
     wait_for_socket(&socket);
 
-    // Serialise env mutations across tests on different threads.
-    // tokio::sync::MutexGuard is safe to hold across `.await` points.
-    let _env_guard = ENV_LOCK.lock().await;
     // Point ensure_running at the running daemon via XDG_RUNTIME_DIR.
-    // SAFETY: ENV_LOCK serialises all env-mutating tests so no other test
-    // can observe inconsistent env state; not safe for multi-threaded production code.
-    unsafe { std::env::set_var("XDG_RUNTIME_DIR", tempdir.path()) };
-    let result = ensure_running().await;
-    // Restore before releasing the lock.
-    unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    let result = temp_env::async_with_vars([("XDG_RUNTIME_DIR", Some(tempdir.path()))], async {
+        ensure_running().await
+    })
+    .await;
 
     assert!(
         result.is_ok(),
@@ -117,22 +114,16 @@ async fn ensure_running_autospawns_daemon() {
 
     let tempdir = tempdir().unwrap();
 
-    // Serialise env mutations across tests on different threads.
-    // tokio::sync::MutexGuard is safe to hold across `.await` points.
-    let _env_guard = ENV_LOCK.lock().await;
-    // Use a fresh dir so no daemon is running there.
-    // SAFETY: ENV_LOCK serialises all env-mutating tests so no other test
-    // can observe inconsistent env state; not safe for multi-threaded production code.
-    unsafe {
-        std::env::set_var("XDG_RUNTIME_DIR", tempdir.path());
-        std::env::set_var("PATH", &new_path);
-    }
-    let result = ensure_running().await;
-    // Restore before releasing the lock.
-    unsafe {
-        std::env::remove_var("XDG_RUNTIME_DIR");
-        std::env::set_var("PATH", &orig_path);
-    }
+    // Use a fresh runtime dir so no daemon is running there, and a
+    // PATH that puts the just-built geesed binary first.
+    let result = temp_env::async_with_vars(
+        [
+            ("XDG_RUNTIME_DIR", Some(tempdir.path().as_os_str())),
+            ("PATH", Some(new_path.as_os_str())),
+        ],
+        async { ensure_running().await },
+    )
+    .await;
 
     assert!(
         result.is_ok(),

@@ -25,3 +25,11 @@ toml.workspace = true
 assert_cmd.workspace = true
 tempfile.workspace = true
 nix.workspace = true
+# Scope-guarded env mutator for the `#[cfg(test)]` block in
+# `src/storage.rs`. Replaces the `unsafe { std::env::set_var }` shape
+# and lets us drop the hand-rolled `ENV_LOCK` Mutex — `temp-env`
+# carries its own crate-level mutex with panic-safe restore.
+temp-env.workspace = true
+
+[lints]
+workspace = true

@@ -2,6 +2,23 @@
 members = ["crates/geese", "crates/geese-client", "crates/geesed"]
 resolver = "2"
 
+# Workspace-wide lint policy. Inherited by every member crate via
+# `[lints] workspace = true` in their `Cargo.toml`. The set is
+# intentionally tiny:
+#
+# * `unsafe_code = "forbid"` — we don't write `unsafe` outside of
+#   tests, full stop. `forbid` (vs `deny`) means a downstream
+#   `#![allow(unsafe_code)]` in a child module cannot re-enable it;
+#   a future PR that needs an `unsafe` block has to first change the
+#   policy here in a stand-alone commit, which gets reviewed on its
+#   own merits.
+#
+# Mirrors the same policy on `botworkz/botwork`,
+# `botworkz/botwork-extra`, `botworkz/mcp`, `botworkz/mcp-extra`,
+# and `botworkz/gander`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -13,10 +30,21 @@ chrono = { version = "0.4", default-features = true }
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6"
 fs2 = "0.4"
-nix = { version = "0.29", features = ["signal", "user"] }
+# `process` feature gives us `nix::unistd::daemon`, the safe wrapper
+# around `daemon(3)` that geesed calls at startup to detach from the
+# controlling terminal (previously done via an `unsafe { pre_exec(setsid) }`
+# block on the geese-client side).
+nix = { version = "0.29", features = ["process", "signal", "user"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.10"
+# `temp-env` is the safe scope-guarded env mutator that tests use
+# instead of the Rust 2024 `unsafe { std::env::set_var }` shape.
+# The `async_closure` feature is needed for tokio-test bodies;
+# `temp-env`'s `Drop` impl restores env state even on panic, so
+# tests no longer need the hand-rolled `ENV_LOCK` Mutex + manual
+# restore arms that used to live in this workspace.
+temp-env = { version = "0.3", features = ["async_closure"] }
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["full"] }
 toml = "0.8"

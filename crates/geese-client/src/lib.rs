@@ -269,21 +269,12 @@ pub async fn ensure_running() -> Result<GeesedClient, ClientError> {
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_clone));
 
-    // Detach from the cli's controlling terminal / session so the daemon
-    // survives the cli exiting. Without setsid a SIGHUP on terminal close
-    // would kill geesed along with the shell that spawned it.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is async-signal-safe; pre_exec only invokes it.
-        unsafe {
-            cmd.pre_exec(|| {
-                nix::unistd::setsid()
-                    .map(|_| ())
-                    .map_err(std::io::Error::from)
-            });
-        }
-    }
+    // Detaching from the cli's controlling terminal used to live here as an
+    // `unsafe { cmd.pre_exec(setsid) }` block. It has moved into geesed
+    // itself (see `geesed::run`'s `setsid` call), which detects autospawn
+    // by `stdin.is_terminal() == false` — exactly the case we set up here
+    // by redirecting stdin to `/dev/null`. The daemon-detach contract is
+    // the same; the unsafe block is gone.
 
     cmd.spawn().map_err(ClientError::Io)?;
 

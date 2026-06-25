@@ -20,6 +20,10 @@ path = "tests/fixtures/mock_goose_exit.rs"
 chrono.workspace = true
 fs2.workspace = true
 geese = { path = "../geese" }
+# `setsid()` for the autospawned-daemon detach (see `main.rs`).
+# `process` feature exposes `nix::unistd::setsid` + the `errno`
+# convenience re-export. `signal` / `user` are needed by other
+# call sites in the workspace (kept consistent with workspace dep).
 nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,3 +37,9 @@ assert_cmd.workspace = true
 dirs.workspace = true
 tempfile.workspace = true
 nix.workspace = true
+# Scope-guarded env mutator for `tests/cwd_config.rs`. Replaces the
+# `unsafe { std::env::set_var }` shape + hand-rolled `ENV_LOCK` mutex.
+temp-env.workspace = true
+
+[lints]
+workspace = true
